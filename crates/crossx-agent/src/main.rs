@@ -14,6 +14,9 @@ use agent_telemetry::HostSampler;
 use clap::{Parser, Subcommand};
 use crossx_agent::config::AgentConfig;
 use crossx_agent::export;
+use crossx_agent::export::RelayTransportReceiver;
+
+mod relay;
 
 #[derive(Parser)]
 #[command(
@@ -54,21 +57,48 @@ async fn main() -> anyhow::Result<()> {
             let cfg = AgentConfig::load(config.as_deref())?;
             if once {
                 crossx_agent::run_once(&cfg).await
-            } else if cfg.logs.enabled {
-                tokio::try_join!(run_loop(&cfg), crossx_agent::logs::run_logs_loop(&cfg))?;
-                Ok(())
             } else {
-                run_loop(&cfg).await
+                run_forever(&cfg).await
             }
         }
     }
 }
 
+async fn run_forever(cfg: &AgentConfig) -> anyhow::Result<()> {
+    if cfg.relay.enabled {
+        let (telemetry_tx, telemetry_rx) = export::relay_transport_slot();
+        if cfg.logs.enabled {
+            tokio::try_join!(
+                run_loop(cfg, Some(telemetry_rx)),
+                relay::run(cfg, telemetry_tx),
+                crossx_agent::logs::run_logs_loop(cfg),
+            )?;
+        } else {
+            tokio::try_join!(
+                run_loop(cfg, Some(telemetry_rx)),
+                relay::run(cfg, telemetry_tx),
+            )?;
+        }
+        Ok(())
+    } else if cfg.logs.enabled {
+        tokio::try_join!(run_loop(cfg, None), crossx_agent::logs::run_logs_loop(cfg))?;
+        Ok(())
+    } else {
+        run_loop(cfg, None).await
+    }
+}
+
 /// Exports forever at the configured cadence, preserving failed batches in
 /// the metrics WAL for strict-FIFO replay on later ticks.
-async fn run_loop(cfg: &AgentConfig) -> anyhow::Result<()> {
+async fn run_loop(
+    cfg: &AgentConfig,
+    relay_transport: Option<RelayTransportReceiver>,
+) -> anyhow::Result<()> {
     let mut sampler = HostSampler::new();
-    let mut exporter = export::MetricsExporter::open(cfg)?;
+    let mut exporter = match relay_transport {
+        Some(incoming) => export::MetricsExporter::open_with_relay(cfg, incoming)?,
+        None => export::MetricsExporter::open(cfg)?,
+    };
     let mut ticker = tokio::time::interval(Duration::from_secs(cfg.interval_secs.max(1)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {

@@ -8,8 +8,11 @@ repository.workspace = true
 [dependencies]
 agent-telemetry.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
 clap.workspace = true
+crossx-relay-rs = { path = "../crossx-relay-rs" }
 dirs-next = "2"
+hyper-util = { version = "0.1", features = ["tokio"] }
 opentelemetry-proto.workspace = true
 prost.workspace = true
 serde.workspace = true
