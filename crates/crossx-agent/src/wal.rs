@@ -272,6 +272,13 @@ fn segment_sequences(dir: &Path) -> anyhow::Result<Vec<u64>> {
     Ok(sequences)
 }
 
+/// Rebuilds the pending-record index for one segment and repairs its tail.
+///
+/// A crash mid-append can leave a torn record (header and/or partial payload)
+/// at the end of the file. The torn bytes must be truncated away here: later
+/// appends land at physical EOF, and once a valid record follows the torn one
+/// the next scan would misread the torn header as a real record and consume
+/// the valid record's bytes as its payload, silently losing it.
 fn scan_segment(
     dir: &Path,
     segment: u64,
@@ -279,10 +286,13 @@ fn scan_segment(
     records: &mut VecDeque<RecordMeta>,
 ) -> anyhow::Result<()> {
     let path = segment_path(dir, segment);
+    // why: write (not append) access — truncating the torn tail below needs
+    // set_len, which Windows denies on append-only handles.
     let mut file = OpenOptions::new()
         .read(true)
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(false)
         .open(&path)
         .with_context(|| format!("opening WAL segment {}", path.display()))?;
     let file_len = file
@@ -309,6 +319,18 @@ fn scan_segment(
             });
         }
         offset += record_len;
+    }
+    if offset < file_len {
+        tracing::warn!(
+            segment,
+            valid_end = offset,
+            file_len,
+            "truncating torn record at WAL segment tail"
+        );
+        file.set_len(offset)
+            .with_context(|| format!("truncating torn WAL segment tail {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing truncated WAL segment {}", path.display()))?;
     }
     Ok(())
 }
@@ -427,6 +449,49 @@ mod tests {
 
         assert_eq!(wal.pending(), 1);
         assert_eq!(entry.payload, newest);
+    }
+
+    #[test]
+    fn torn_tail_should_be_truncated_on_open_so_later_appends_stay_parseable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut wal = Wal::open(temp.path(), 64 * 1024 * 1024).expect("open WAL");
+        wal.append(b"first").expect("append first");
+        drop(wal);
+
+        // Simulate a crash mid-append: a full header claiming a 100-byte
+        // payload, followed by only 10 payload bytes.
+        let segment_path = temp.path().join("wal-0.log");
+        let mut segment = OpenOptions::new()
+            .append(true)
+            .open(&segment_path)
+            .expect("open segment for torn write");
+        segment
+            .write_all(&100_u32.to_le_bytes())
+            .expect("write torn length");
+        segment
+            .write_all(&0xdead_beef_u32.to_le_bytes())
+            .expect("write torn checksum");
+        segment
+            .write_all(&[9_u8; 10])
+            .expect("write torn partial payload");
+        segment.sync_data().expect("sync torn record");
+        drop(segment);
+
+        // First restart must repair the tail before appending after it.
+        let mut restarted = Wal::open(temp.path(), 64 * 1024 * 1024).expect("reopen after crash");
+        let survivor = vec![7_u8; 120];
+        restarted.append(&survivor).expect("append after torn tail");
+        drop(restarted);
+
+        // Second restart must still see both durable records.
+        let mut reopened = Wal::open(temp.path(), 64 * 1024 * 1024).expect("second reopen");
+        let mut payloads = Vec::new();
+        while let Some(entry) = reopened.next().expect("drain reopened WAL") {
+            payloads.push(entry.payload.clone());
+            reopened.ack(&entry).expect("ack drained entry");
+        }
+
+        assert_eq!(payloads, vec![b"first".to_vec(), survivor]);
     }
 
     #[test]
