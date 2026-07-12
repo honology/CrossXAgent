@@ -20,4 +20,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# test-util enables paused time so timeout tests elapse virtually.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-stream.workspace = true

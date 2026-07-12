@@ -18,9 +18,21 @@ const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(8),
 ];
 
+/// Hard bound on one connect + export attempt. Without it a collector that
+/// accepts TCP but never answers (hung process, black-holing firewall,
+/// half-open connection) would wedge `export_tick` — and with it the whole
+/// run loop — forever (spec §8: degradation must stay bounded).
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bounds connection establishment within an attempt so unroutable endpoints
+/// fail faster than the OS connect timeout (which can reach minutes).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Samples one tick and exports it over OTLP/gRPC, retrying on failure.
-/// The final error is returned once the schedule is exhausted; the caller
-/// decides whether to drop the batch (loop mode) or exit non-zero (--once).
+/// Each attempt is hard-bounded by [`ATTEMPT_TIMEOUT`], so one tick resolves
+/// within ~51s worst case even against an unresponsive collector. The final
+/// error is returned once the schedule is exhausted; the caller decides
+/// whether to drop the batch (loop mode) or exit non-zero (--once).
 pub async fn export_tick(cfg: &AgentConfig, sampler: &mut HostSampler) -> anyhow::Result<()> {
     let samples = sampler.sample();
     let host_name = System::host_name().unwrap_or_else(|| "unknown".to_owned());
@@ -32,9 +44,17 @@ pub async fn export_tick(cfg: &AgentConfig, sampler: &mut HostSampler) -> anyhow
         if attempt > 0 {
             tokio::time::sleep(RETRY_DELAYS[attempt - 1] + jitter()).await;
         }
-        match try_export(cfg, request.clone()).await {
-            Ok(()) => return Ok(()),
-            Err(error) => {
+        match tokio::time::timeout(ATTEMPT_TIMEOUT, try_export(cfg, request.clone())).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => {
+                tracing::warn!(attempt, "OTLP export attempt failed: {error:#}");
+                last_error = Some(error);
+            }
+            Err(_elapsed) => {
+                let error = anyhow::anyhow!(
+                    "export attempt timed out after {}s (collector accepted the connection but never answered?)",
+                    ATTEMPT_TIMEOUT.as_secs()
+                );
                 tracing::warn!(attempt, "OTLP export attempt failed: {error:#}");
                 last_error = Some(error);
             }
@@ -46,6 +66,7 @@ pub async fn export_tick(cfg: &AgentConfig, sampler: &mut HostSampler) -> anyhow
 async fn try_export(cfg: &AgentConfig, request: ExportMetricsServiceRequest) -> anyhow::Result<()> {
     let channel = Channel::from_shared(cfg.collector_endpoint.clone())
         .with_context(|| format!("invalid collector endpoint {}", cfg.collector_endpoint))?
+        .connect_timeout(CONNECT_TIMEOUT)
         .connect()
         .await
         .with_context(|| format!("connecting to collector {}", cfg.collector_endpoint))?;

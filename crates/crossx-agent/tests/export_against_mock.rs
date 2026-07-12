@@ -103,6 +103,29 @@ async fn run_once_should_deliver_labeled_request_when_collector_is_reachable() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn run_once_should_fail_within_bounded_time_when_collector_accepts_but_never_responds() {
+    // The bound listener's kernel backlog completes the TCP handshake, but
+    // nothing ever accepts the connection or answers the HTTP/2 preface —
+    // the classic hung/black-holed collector. Paused time auto-advances the
+    // tokio clock, so the virtual retry budget elapses in wall-time
+    // milliseconds; the 300s guard only trips if run_once hangs unbounded.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind silent listener");
+    let addr = listener.local_addr().expect("silent listener addr");
+    let cfg = config_for(addr);
+
+    let result = tokio::time::timeout(Duration::from_secs(300), run_once(&cfg)).await;
+
+    let run_result =
+        result.expect("run_once should give up within its bounded retry budget, not hang");
+    assert!(
+        run_result.is_err(),
+        "export against an unresponsive collector should fail"
+    );
+}
+
 #[tokio::test]
 async fn run_once_should_fail_when_collector_port_is_dead() {
     // Reserve a port, then close the listener so nothing accepts on it.
