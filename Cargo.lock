@@ -312,8 +312,11 @@ version = "0.1.0"
 dependencies = [
  "agent-telemetry",
  "anyhow",
+ "base64",
  "clap",
+ "crossx-relay-rs",
  "dirs-next",
+ "hyper-util",
  "opentelemetry-proto",
  "prost",
  "serde",
