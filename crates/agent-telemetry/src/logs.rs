@@ -29,7 +29,18 @@ pub struct FileTailer {
 }
 
 impl FileTailer {
+    /// Upper bound on bytes consumed from the file per poll. Bounds tailer
+    /// memory and keeps one exported batch comfortably below common OTLP/gRPC
+    /// message-size limits (tonic decodes at most 4 MiB by default).
+    pub const MAX_POLL_BYTES: u64 = 512 * 1024;
+    /// Upper bound on records returned per poll so floods of tiny lines
+    /// cannot blow up the per-record OTLP encoding overhead.
+    pub const MAX_POLL_RECORDS: usize = 4096;
+
     /// Opens a file tailer and its path-specific checkpoint.
+    ///
+    /// A file seen for the first time (no checkpoint on disk) is tailed from
+    /// its current end, mirroring the journald follower's `--since now`.
     pub fn new(path: PathBuf, checkpoint_dir: &Path) -> anyhow::Result<Self> {
         let metadata = std::fs::metadata(&path)
             .with_context(|| format!("reading log file metadata {}", path.display()))?;
@@ -41,11 +52,20 @@ impl FileTailer {
         })?;
         let checkpoint_path = checkpoint_path(checkpoint_dir, &path);
         let signature = file_signature(&metadata);
-        let offset = read_checkpoint(&checkpoint_path)?
-            .filter(|checkpoint| {
-                checkpoint.signature == signature && checkpoint.offset <= metadata.len()
-            })
-            .map_or(0, |checkpoint| checkpoint.offset);
+        let offset = match read_checkpoint(&checkpoint_path)? {
+            Some(checkpoint)
+                if checkpoint.signature == signature && checkpoint.offset <= metadata.len() =>
+            {
+                checkpoint.offset
+            }
+            // The checkpointed file was rotated or truncated since the last
+            // run: read its replacement from the top so nothing is skipped.
+            Some(_) => 0,
+            // why: shipping a large pre-existing backlog on first acquaintance
+            // would flood the collector and could exceed request-size limits;
+            // history before the agent existed is not this agent's job.
+            None => metadata.len(),
+        };
         Ok(Self {
             checkpoint_path,
             path,
@@ -56,7 +76,9 @@ impl FileTailer {
         })
     }
 
-    /// Returns complete lines added since the last poll.
+    /// Returns complete lines added since the last poll, bounded per call by
+    /// [`Self::MAX_POLL_BYTES`] and [`Self::MAX_POLL_RECORDS`]; a backlog is
+    /// drained across successive polls.
     pub fn poll(&mut self) -> anyhow::Result<Vec<LogRecordSample>> {
         let metadata = std::fs::metadata(&self.path)
             .with_context(|| format!("reading log file metadata {}", self.path.display()))?;
@@ -71,33 +93,42 @@ impl FileTailer {
         file.seek(SeekFrom::Start(start_offset))
             .with_context(|| format!("seeking log file {}", self.path.display()))?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        file.take(Self::MAX_POLL_BYTES)
+            .read_to_end(&mut bytes)
             .with_context(|| format!("reading log file {}", self.path.display()))?;
-        let Some(complete_len) = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map(|index| index + 1)
-        else {
-            self.pending_offset = start_offset;
-            self.pending_signature = signature;
-            return Ok(Vec::new());
-        };
+        let window_full = bytes.len() as u64 == Self::MAX_POLL_BYTES;
         let ts_ms = unix_millis_now()?;
         let source = self.path.to_string_lossy();
-        let records = bytes[..complete_len - 1]
-            .split(|byte| *byte == b'\n')
-            .map(|line| {
-                let line = line.strip_suffix(b"\r").unwrap_or(line);
-                LogRecordSample {
-                    ts_ms,
-                    severity: 0,
-                    body: String::from_utf8_lossy(line).into_owned(),
-                    attrs: vec![("log.source".to_owned(), source.to_string())],
-                }
-            })
-            .collect();
+        let mut records = Vec::new();
+        let mut consumed = 0_usize;
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if records.len() == Self::MAX_POLL_RECORDS {
+                break;
+            }
+            let complete = line.last() == Some(&b'\n');
+            // why: a single line longer than the whole poll window would
+            // stall the tailer forever; ship the window as one split record.
+            let split_oversized_line = window_full && consumed == 0;
+            if !complete && !split_oversized_line {
+                // Incomplete tail line: wait for its newline on a later poll.
+                break;
+            }
+            let body = if complete {
+                &line[..line.len() - 1]
+            } else {
+                line
+            };
+            let body = body.strip_suffix(b"\r").unwrap_or(body);
+            records.push(LogRecordSample {
+                ts_ms,
+                severity: 0,
+                body: String::from_utf8_lossy(body).into_owned(),
+                attrs: vec![("log.source".to_owned(), source.to_string())],
+            });
+            consumed += line.len();
+        }
         self.pending_offset = start_offset
-            .checked_add(u64::try_from(complete_len).context("complete log bytes exceed u64")?)
+            .checked_add(u64::try_from(consumed).context("consumed log bytes exceed u64")?)
             .context("log checkpoint offset overflow")?;
         self.pending_signature = signature;
         Ok(records)
@@ -300,11 +331,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn file_tailer_should_start_at_end_of_preexisting_file_when_no_checkpoint_exists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("app.log");
+        std::fs::write(&path, b"historical line\n").expect("seed pre-existing log");
+        let mut tailer = FileTailer::new(path.clone(), temp.path()).expect("create tailer");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open log for append");
+        file.write_all(b"fresh line\n").expect("append fresh line");
+
+        let bodies = tailer
+            .poll()
+            .expect("poll after append")
+            .into_iter()
+            .map(|record| record.body)
+            .collect::<Vec<_>>();
+
+        assert_eq!(bodies, vec!["fresh line".to_owned()]);
+    }
+
+    #[test]
+    fn poll_should_split_large_backlog_into_bounded_batches() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("app.log");
+        std::fs::write(&path, b"").expect("seed empty log");
+        let mut tailer = FileTailer::new(path.clone(), temp.path()).expect("create tailer");
+        // Enough 100-byte lines to exceed both the byte and the record bound.
+        let total_lines = 10_000_usize;
+        let line = format!("{}\n", "x".repeat(99));
+        std::fs::write(&path, line.repeat(total_lines)).expect("write backlog");
+
+        let mut batch_sizes = Vec::new();
+        loop {
+            let records = tailer.poll().expect("poll bounded batch");
+            if records.is_empty() {
+                break;
+            }
+            let batch_bytes = records
+                .iter()
+                .map(|record| record.body.len() as u64 + 1)
+                .sum::<u64>();
+            assert!(records.len() <= FileTailer::MAX_POLL_RECORDS);
+            assert!(batch_bytes <= FileTailer::MAX_POLL_BYTES);
+            batch_sizes.push(records.len());
+            tailer
+                .persist_checkpoint()
+                .expect("persist batch checkpoint");
+        }
+
+        assert!(batch_sizes.len() >= 2, "backlog should take several polls");
+        assert_eq!(batch_sizes.iter().sum::<usize>(), total_lines);
+    }
+
+    #[test]
+    fn poll_should_ship_line_longer_than_window_as_split_record() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("app.log");
+        std::fs::write(&path, b"").expect("seed empty log");
+        let mut tailer = FileTailer::new(path.clone(), temp.path()).expect("create tailer");
+        let window = usize::try_from(FileTailer::MAX_POLL_BYTES).expect("window fits usize");
+        let mut content = "a".repeat(window + 100);
+        content.push('\n');
+        content.push_str("tail\n");
+        std::fs::write(&path, content).expect("write oversized line");
+
+        let first = tailer.poll().expect("poll window-filling split");
+        tailer
+            .persist_checkpoint()
+            .expect("persist split checkpoint");
+        let second = tailer.poll().expect("poll line remainder");
+
+        assert_eq!(
+            first
+                .iter()
+                .map(|record| record.body.len())
+                .collect::<Vec<_>>(),
+            vec![window]
+        );
+        assert_eq!(
+            second
+                .into_iter()
+                .map(|record| record.body)
+                .collect::<Vec<_>>(),
+            vec!["a".repeat(100), "tail".to_owned()]
+        );
+    }
+
+    #[test]
     fn file_tailer_should_hold_partial_line_until_newline_arrives() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("app.log");
-        std::fs::write(&path, b"complete\npartial").expect("seed log");
+        std::fs::write(&path, b"").expect("seed empty log");
         let mut tailer = FileTailer::new(path.clone(), temp.path()).expect("create tailer");
+        std::fs::write(&path, b"complete\npartial").expect("write partial log");
 
         let first = tailer.poll().expect("first poll");
         tailer
@@ -381,12 +502,22 @@ mod tests {
     fn file_tailer_should_repeat_uncheckpointed_lines_after_failed_handoff() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("app.log");
-        std::fs::write(&path, b"not-durable-yet\n").expect("seed log");
-        let mut tailer = FileTailer::new(path, temp.path()).expect("create tailer");
+        std::fs::write(&path, b"").expect("seed empty log");
+        let mut tailer = FileTailer::new(path.clone(), temp.path()).expect("create tailer");
+        std::fs::write(&path, b"not-durable-yet\n").expect("write undelivered line");
 
-        let first = tailer.poll().expect("first poll");
-        let retried = tailer.poll().expect("retry poll");
+        // Compare bodies, not whole records: ts_ms is stamped per poll and the
+        // two polls may land on different milliseconds.
+        let bodies = |records: Vec<LogRecordSample>| {
+            records
+                .into_iter()
+                .map(|record| record.body)
+                .collect::<Vec<_>>()
+        };
+        let first = bodies(tailer.poll().expect("first poll"));
+        let retried = bodies(tailer.poll().expect("retry poll"));
 
+        assert_eq!(first, vec!["not-durable-yet".to_owned()]);
         assert_eq!(first, retried);
     }
 

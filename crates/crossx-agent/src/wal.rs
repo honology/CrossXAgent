@@ -74,6 +74,14 @@ impl Wal {
     pub fn append(&mut self, payload: &[u8]) -> anyhow::Result<()> {
         let payload_len = u32::try_from(payload.len()).context("WAL payload exceeds u32 length")?;
         let record_len = HEADER_BYTES + u64::from(payload_len);
+        // why: a record larger than the whole WAL budget would be evicted by
+        // enforce_cap inside this same call while still returning Ok — the
+        // caller would then advance source checkpoints for vanished data.
+        anyhow::ensure!(
+            record_len <= self.max_bytes,
+            "WAL record of {record_len} bytes exceeds the WAL capacity of {} bytes",
+            self.max_bytes
+        );
         let active_len = self
             .active_file
             .metadata()
@@ -449,6 +457,18 @@ mod tests {
 
         assert_eq!(wal.pending(), 1);
         assert_eq!(entry.payload, newest);
+    }
+
+    #[test]
+    fn append_should_reject_record_larger_than_wal_capacity_instead_of_silently_evicting_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut wal = Wal::open(temp.path(), 1024).expect("open WAL");
+        let oversized = vec![1_u8; 2048];
+
+        let result = wal.append(&oversized);
+
+        assert!(result.is_err(), "oversized append must not report success");
+        assert_eq!(wal.pending(), 0);
     }
 
     #[test]
