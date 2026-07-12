@@ -4,11 +4,15 @@ use agent_telemetry::{HostSampler, build_export_request};
 use anyhow::Context;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
+use prost::Message;
 use sysinfo::System;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::Channel;
 
 use crate::config::AgentConfig;
+use crate::wal::Wal;
+
+const MAX_WAL_DRAIN_PER_TICK: usize = 32;
 
 /// Backoff schedule (plan Task B3): one initial attempt plus one retry per
 /// entry, each delay widened by jitter.
@@ -28,17 +32,73 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// fail faster than the OS connect timeout (which can reach minutes).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Samples one tick and exports it over OTLP/gRPC, retrying on failure.
-/// Each attempt is hard-bounded by [`ATTEMPT_TIMEOUT`], so one tick resolves
-/// within ~51s worst case even against an unresponsive collector. The final
-/// error is returned once the schedule is exhausted; the caller decides
-/// whether to drop the batch (loop mode) or exit non-zero (--once).
-pub async fn export_tick(cfg: &AgentConfig, sampler: &mut HostSampler) -> anyhow::Result<()> {
-    let samples = sampler.sample();
-    let host_name = System::host_name().unwrap_or_else(|| "unknown".to_owned());
-    let ts_ms = unix_millis_now()?;
-    let request = build_export_request(&cfg.node_id, &host_name, ts_ms, &samples);
+/// Stateful metrics export path with strict FIFO disk backfill.
+pub struct MetricsExporter {
+    wal: Wal,
+}
 
+impl MetricsExporter {
+    /// Opens the metrics WAL below `<state_dir>/wal/metrics`.
+    pub fn open(cfg: &AgentConfig) -> anyhow::Result<Self> {
+        let wal = Wal::open(
+            &cfg.state_dir.join("wal").join("metrics"),
+            cfg.wal_max_bytes,
+        )?;
+        Ok(Self { wal })
+    }
+
+    /// Samples and exports one tick, queueing it whenever direct delivery fails.
+    pub async fn export_tick(
+        &mut self,
+        cfg: &AgentConfig,
+        sampler: &mut HostSampler,
+    ) -> anyhow::Result<()> {
+        let samples = sampler.sample();
+        let host_name = System::host_name().unwrap_or_else(|| "unknown".to_owned());
+        let ts_ms = unix_millis_now()?;
+        let request = build_export_request(&cfg.node_id, &host_name, ts_ms, &samples);
+        let payload = request.encode_to_vec();
+
+        if self.wal.pending() > 0 {
+            self.wal.append(&payload)?;
+            return self.drain_wal(cfg).await;
+        }
+
+        if let Err(error) = export_with_retry(cfg, request).await {
+            self.wal
+                .append(&payload)
+                .context("persisting failed metrics export to WAL")?;
+            return Err(error.context("metrics export failed; batch persisted to WAL"));
+        }
+        Ok(())
+    }
+
+    async fn drain_wal(&mut self, cfg: &AgentConfig) -> anyhow::Result<()> {
+        for _ in 0..MAX_WAL_DRAIN_PER_TICK {
+            let Some(entry) = self.wal.next()? else {
+                break;
+            };
+            let request = ExportMetricsServiceRequest::decode(entry.payload.as_slice())
+                .context("decoding metrics request from WAL")?;
+            export_with_retry(cfg, request)
+                .await
+                .context("exporting metrics WAL head; entry remains queued")?;
+            self.wal.ack(&entry)?;
+        }
+        Ok(())
+    }
+}
+
+/// Samples one tick through a freshly opened persistent metrics exporter.
+pub async fn export_tick(cfg: &AgentConfig, sampler: &mut HostSampler) -> anyhow::Result<()> {
+    let mut exporter = MetricsExporter::open(cfg)?;
+    exporter.export_tick(cfg, sampler).await
+}
+
+async fn export_with_retry(
+    cfg: &AgentConfig,
+    request: ExportMetricsServiceRequest,
+) -> anyhow::Result<()> {
     let mut last_error = None;
     for attempt in 0..=RETRY_DELAYS.len() {
         if attempt > 0 {

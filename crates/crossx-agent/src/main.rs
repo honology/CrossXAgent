@@ -61,16 +61,17 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Exports forever at the configured cadence. A batch that still fails after
-/// retries is dropped with a warning — the disk WAL + backfill land in M2.
+/// Exports forever at the configured cadence, preserving failed batches in
+/// the metrics WAL for strict-FIFO replay on later ticks.
 async fn run_loop(cfg: &AgentConfig) -> anyhow::Result<()> {
     let mut sampler = HostSampler::new();
+    let mut exporter = export::MetricsExporter::open(cfg)?;
     let mut ticker = tokio::time::interval(Duration::from_secs(cfg.interval_secs.max(1)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        if let Err(error) = export::export_tick(cfg, &mut sampler).await {
-            tracing::warn!("dropping batch after failed export (WAL lands in M2): {error:#}");
+        if let Err(error) = exporter.export_tick(cfg, &mut sampler).await {
+            tracing::warn!("metrics export deferred to WAL: {error:#}");
         }
     }
 }

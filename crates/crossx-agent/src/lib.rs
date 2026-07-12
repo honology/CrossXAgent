@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod export;
+pub mod wal;
 
 pub use config::AgentConfig;
 

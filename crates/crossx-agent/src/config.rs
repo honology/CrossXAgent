@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
@@ -17,6 +17,10 @@ pub struct AgentConfig {
     pub auth_token: String,
     /// Seconds between export ticks.
     pub interval_secs: u64,
+    /// Persistent agent state root. Signal-specific WALs live below `wal/`.
+    pub state_dir: PathBuf,
+    /// Maximum bytes retained by each signal-specific WAL.
+    pub wal_max_bytes: u64,
 }
 
 impl Default for AgentConfig {
@@ -26,6 +30,8 @@ impl Default for AgentConfig {
             node_id: "node-dev".to_owned(),
             auth_token: String::new(),
             interval_secs: 5,
+            state_dir: default_state_dir(),
+            wal_max_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -63,8 +69,23 @@ impl AgentConfig {
                 .parse()
                 .context("CROSSX_AGENT_INTERVAL_SECS must be a non-negative integer")?;
         }
+        if let Some(value) = lookup("CROSSX_AGENT_STATE_DIR") {
+            self.state_dir = PathBuf::from(value);
+        }
+        if let Some(value) = lookup("CROSSX_AGENT_WAL_MAX_BYTES") {
+            self.wal_max_bytes = value
+                .parse()
+                .context("CROSSX_AGENT_WAL_MAX_BYTES must be a non-negative integer")?;
+        }
         Ok(())
     }
+}
+
+fn default_state_dir() -> PathBuf {
+    dirs_next::data_dir().map_or_else(
+        || PathBuf::from(".").join("crossx-agent"),
+        |dir| dir.join("crossx-agent"),
+    )
 }
 
 #[cfg(test)]
@@ -81,6 +102,8 @@ mod tests {
         assert_eq!(cfg.node_id, "node-dev");
         assert_eq!(cfg.auth_token, "");
         assert_eq!(cfg.interval_secs, 5);
+        assert!(cfg.state_dir.ends_with("crossx-agent"));
+        assert_eq!(cfg.wal_max_bytes, 64 * 1024 * 1024);
     }
 
     #[test]
@@ -89,12 +112,16 @@ mod tests {
             r#"
             collector_endpoint = "http://10.0.0.9:4317"
             node_id = "node-abc"
+            state_dir = "D:/crossx-state"
+            wal_max_bytes = 2048
             "#,
         )
         .expect("valid TOML");
 
         assert_eq!(cfg.collector_endpoint, "http://10.0.0.9:4317");
         assert_eq!(cfg.node_id, "node-abc");
+        assert_eq!(cfg.state_dir, Path::new("D:/crossx-state"));
+        assert_eq!(cfg.wal_max_bytes, 2048);
         // Unset keys keep their defaults.
         assert_eq!(cfg.interval_secs, 5);
     }
@@ -122,6 +149,21 @@ mod tests {
             cfg.apply_env(|name| (name == "CROSSX_AGENT_INTERVAL_SECS").then(|| "soon".to_owned()));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn env_should_override_state_dir_and_wal_max_bytes() {
+        let mut cfg = AgentConfig::default();
+
+        cfg.apply_env(|name| match name {
+            "CROSSX_AGENT_STATE_DIR" => Some("D:/crossx-state".to_owned()),
+            "CROSSX_AGENT_WAL_MAX_BYTES" => Some("4096".to_owned()),
+            _ => None,
+        })
+        .expect("env overrides apply");
+
+        assert_eq!(cfg.state_dir, Path::new("D:/crossx-state"));
+        assert_eq!(cfg.wal_max_bytes, 4096);
     }
 
     #[test]
