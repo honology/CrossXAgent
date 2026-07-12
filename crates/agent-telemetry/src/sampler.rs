@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use sysinfo::{Disks, NetworkData, Networks, System};
 
 /// Kind of an emitted sample; selects the OTLP data-point family.
@@ -27,17 +29,33 @@ pub struct HostSampler {
 }
 
 impl HostSampler {
+    /// Creates the sampler and completes the CPU warmup: it returns only once
+    /// the first `sample()` can measure a real utilization window, so it may
+    /// block up to `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL` (~200ms, once).
     pub fn new() -> Self {
+        let warmup_started = Instant::now();
         let mut system = System::new();
         // Warmup refresh: CPU usage is a delta against the previous snapshot,
         // so without this the first tick would always report 0.
         system.refresh_cpu_usage();
         system.refresh_memory();
-        Self {
+        let sampler = Self {
             system,
             networks: Networks::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
+        };
+        // The warmup alone is not enough: sysinfo skips CPU refreshes that
+        // land within MINIMUM_CPU_UPDATE_INTERVAL of the warmup (Linux/macOS)
+        // or computes erratic PDH rates over a near-zero window (Windows), so
+        // an immediate first sample() would export a bogus utilization (0.0
+        // or the since-boot average). Wait out whatever the network/disk
+        // enumeration above didn't already cover.
+        if let Some(remaining) =
+            sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.checked_sub(warmup_started.elapsed())
+        {
+            std::thread::sleep(remaining);
         }
+        sampler
     }
 
     /// Collects one tick of host metrics (spec §5 metric set v0).
@@ -235,6 +253,42 @@ mod tests {
                 .iter()
                 .any(|(k, v)| *k == "state" && v == "used"),
             "system.memory.usage should carry state=used"
+        );
+    }
+
+    #[test]
+    fn sample_should_report_nonzero_cpu_utilization_when_sampled_immediately_after_new_under_load()
+    {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Busy-spin one core so real global CPU utilization is provably > 0
+        // for the whole measurement window.
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x.wrapping_add(1);
+                }
+                std::hint::black_box(x)
+            })
+        };
+
+        // No sleep between new() and sample(): exactly what `run --once` and
+        // the run loop's first tick do.
+        let mut sampler = HostSampler::new();
+        let samples = sampler.sample();
+
+        stop.store(true, Ordering::Relaxed);
+        spinner.join().expect("spinner thread panicked");
+
+        let cpu = find(&samples, "system.cpu.utilization").expect("missing system.cpu.utilization");
+        assert!(
+            cpu.value > 0.0,
+            "first-tick CPU utilization should reflect real load, got {}",
+            cpu.value
         );
     }
 
