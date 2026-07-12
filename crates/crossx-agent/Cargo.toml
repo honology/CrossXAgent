@@ -6,3 +6,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agent-telemetry.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+opentelemetry-proto.workspace = true
+serde.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-stream.workspace = true
