@@ -1,0 +1,8 @@
+{
+  "seed_b64": "SZouOaSIRlWBrhKqiR6doisUI04NTy6h6sAWLgT5BCc=",
+  "principal_hint": "agent-e2e",
+  "nonce_b64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+  "cert_digest_b64": "l1pvZkUKvy4Y+kMvVgyvpMYGUT5J0oRV4BPyZx/dMus=",
+  "transcript_b64": "AAAAFGNyb3NzeC1yZWxheS9hdXRoL3YxAAAAIJdab2ZFCr8uGPpDL1YMr6TGBlE+SdKEVeAT8mcf3TLrAAAACWFnZW50LWUyZQAAACABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fIA==",
+  "signature_b64": "EfVIFLFiU4vSz4Uyo99GtpEM4l4DC5nkzlareznceiD5MM4uoTZW9SjBLLYpEfz5DLLigVnbDk+vcUt3E9rPBQ=="
+}

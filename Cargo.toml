@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/agent-telemetry", "crates/crossx-agent"]
+members = [
+    "crates/agent-telemetry",
+    "crates/crossx-agent",
+    "crates/crossx-relay-rs",
+]
 
 [workspace.package]
 version = "0.1.0"
