@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod export;
+pub mod logs;
 pub mod wal;
 
 pub use config::AgentConfig;
@@ -13,5 +14,8 @@ use agent_telemetry::HostSampler;
 /// Backs `crossx-agent run --once`.
 pub async fn run_once(cfg: &AgentConfig) -> anyhow::Result<()> {
     let mut sampler = HostSampler::new();
-    export::export_tick(cfg, &mut sampler).await
+    let metrics_result = export::export_tick(cfg, &mut sampler).await;
+    let logs_result = logs::run_logs_once(cfg).await;
+    metrics_result?;
+    logs_result
 }

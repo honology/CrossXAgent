@@ -13,6 +13,7 @@ dirs-next = "2"
 opentelemetry-proto.workspace = true
 prost.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 toml.workspace = true

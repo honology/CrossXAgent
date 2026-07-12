@@ -3,6 +3,28 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
+/// Log sources collected by the agent.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct LogsConfig {
+    /// Enables file and journald collection. Off by default for v1.
+    pub enabled: bool,
+    /// Explicit log file paths. Globs are intentionally unsupported in v1.
+    pub files: Vec<PathBuf>,
+    /// Follows the systemd journal on Unix hosts.
+    pub journald: bool,
+}
+
+impl Default for LogsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            files: vec![PathBuf::from("/var/log/syslog")],
+            journald: false,
+        }
+    }
+}
+
 /// Agent configuration: defaults, overlaid by a TOML file, overlaid by
 /// `CROSSX_AGENT_*` environment variables.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -21,6 +43,8 @@ pub struct AgentConfig {
     pub state_dir: PathBuf,
     /// Maximum bytes retained by each signal-specific WAL.
     pub wal_max_bytes: u64,
+    /// File and journald collection settings.
+    pub logs: LogsConfig,
 }
 
 impl Default for AgentConfig {
@@ -32,6 +56,7 @@ impl Default for AgentConfig {
             interval_secs: 5,
             state_dir: default_state_dir(),
             wal_max_bytes: 64 * 1024 * 1024,
+            logs: LogsConfig::default(),
         }
     }
 }
@@ -104,6 +129,7 @@ mod tests {
         assert_eq!(cfg.interval_secs, 5);
         assert!(cfg.state_dir.ends_with("crossx-agent"));
         assert_eq!(cfg.wal_max_bytes, 64 * 1024 * 1024);
+        assert_eq!(cfg.logs, LogsConfig::default());
     }
 
     #[test]
@@ -181,5 +207,28 @@ mod tests {
         let result = AgentConfig::load(Some(Path::new("Z:/definitely/not/here.toml")));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn logs_toml_section_should_override_defaults() {
+        let cfg: AgentConfig = toml::from_str(
+            r#"
+            [logs]
+            enabled = true
+            files = ["/var/log/messages", "/opt/crossx/app.log"]
+            journald = true
+            "#,
+        )
+        .expect("valid logs config");
+
+        assert!(cfg.logs.enabled);
+        assert_eq!(
+            cfg.logs.files,
+            [
+                PathBuf::from("/var/log/messages"),
+                PathBuf::from("/opt/crossx/app.log"),
+            ]
+        );
+        assert!(cfg.logs.journald);
     }
 }

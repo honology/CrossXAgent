@@ -3,6 +3,7 @@
 //! conventions — that naming is the compatibility contract with the
 //! pulse-collector and the Monitor widget.
 
+pub mod logs;
 pub mod otlp;
 pub mod sampler;
 

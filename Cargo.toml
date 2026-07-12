@@ -13,13 +13,14 @@ agent-telemetry = { path = "crates/agent-telemetry" }
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.9"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync", "io-util", "process"] }
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
-opentelemetry-proto = { version = "0.32", features = ["gen-tonic", "metrics"] }
+opentelemetry-proto = { version = "0.32", features = ["gen-tonic", "logs", "metrics"] }
 sysinfo = "0.39"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

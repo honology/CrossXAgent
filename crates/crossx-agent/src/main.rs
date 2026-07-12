@@ -54,6 +54,9 @@ async fn main() -> anyhow::Result<()> {
             let cfg = AgentConfig::load(config.as_deref())?;
             if once {
                 crossx_agent::run_once(&cfg).await
+            } else if cfg.logs.enabled {
+                tokio::try_join!(run_loop(&cfg), crossx_agent::logs::run_logs_loop(&cfg))?;
+                Ok(())
             } else {
                 run_loop(&cfg).await
             }
