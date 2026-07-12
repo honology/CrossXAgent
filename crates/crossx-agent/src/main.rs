@@ -65,27 +65,25 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_forever(cfg: &AgentConfig) -> anyhow::Result<()> {
+    // why: logs are best-effort (spec §8 bounded degradation) — a dead logs
+    // subsystem must log loudly but never take metrics collection down.
+    let logs = async {
+        if let Err(error) = crossx_agent::logs::run_logs_loop(cfg).await {
+            tracing::error!("logs collection stopped; metrics export continues: {error:#}");
+        }
+        Ok::<(), anyhow::Error>(())
+    };
     if cfg.relay.enabled {
         let (telemetry_tx, telemetry_rx) = export::relay_transport_slot();
-        if cfg.logs.enabled {
-            tokio::try_join!(
-                run_loop(cfg, Some(telemetry_rx)),
-                relay::run(cfg, telemetry_tx),
-                crossx_agent::logs::run_logs_loop(cfg),
-            )?;
-        } else {
-            tokio::try_join!(
-                run_loop(cfg, Some(telemetry_rx)),
-                relay::run(cfg, telemetry_tx),
-            )?;
-        }
-        Ok(())
-    } else if cfg.logs.enabled {
-        tokio::try_join!(run_loop(cfg, None), crossx_agent::logs::run_logs_loop(cfg))?;
-        Ok(())
+        tokio::try_join!(
+            run_loop(cfg, Some(telemetry_rx)),
+            relay::run(cfg, telemetry_tx),
+            logs,
+        )?;
     } else {
-        run_loop(cfg, None).await
+        tokio::try_join!(run_loop(cfg, None), logs)?;
     }
+    Ok(())
 }
 
 /// Exports forever at the configured cadence, preserving failed batches in

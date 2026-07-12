@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use agent_telemetry::logs::LogRecordSample;
 use crossx_agent::AgentConfig;
-use crossx_agent::logs::LogsExporter;
+use crossx_agent::logs::{FileSource, LogsExporter, poll_file_sources, run_logs_loop};
 use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::{
     LogsService, LogsServiceServer,
 };
@@ -128,4 +129,50 @@ async fn logs_export_loop_should_replay_wal_in_fifo_order_against_flaky_collecto
     );
     assert!(state.path().join("wal").join("logs").is_dir());
     assert!(!state.path().join("wal").join("metrics").exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_logs_loop_should_keep_running_when_configured_log_file_is_missing() {
+    let state = tempfile::tempdir().expect("temp state dir");
+    let mut cfg = config_for("127.0.0.1:1".parse().expect("addr"), state.path());
+    cfg.logs.enabled = true;
+    cfg.logs.journald = false;
+    cfg.logs.files = vec![state.path().join("does-not-exist.log")];
+
+    // The loop must degrade to a warning and keep ticking, not return an
+    // error (which would cancel the metrics loop in main's try_join).
+    let outcome = tokio::time::timeout(Duration::from_millis(250), run_logs_loop(&cfg)).await;
+
+    assert!(
+        outcome.is_err(),
+        "run_logs_loop returned instead of surviving a missing source: {outcome:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn file_source_should_survive_rotation_window_and_resume_exporting() {
+    let (addr, mut requests) = spawn_flaky_logs_collector(0).await;
+    let state = tempfile::tempdir().expect("temp state dir");
+    let cfg = config_for(addr, state.path());
+    let mut exporter = LogsExporter::open(&cfg).expect("open logs exporter");
+    let checkpoint_dir = state.path().join("checkpoints");
+    let log_path = state.path().join("app.log");
+    std::fs::write(&log_path, b"").expect("seed empty log");
+    let mut sources = vec![FileSource::new(log_path.clone(), &checkpoint_dir)];
+
+    std::fs::write(&log_path, b"line-one\n").expect("write first line");
+    poll_file_sources(&cfg, "host-test", &mut exporter, &mut sources).await;
+    // Rotation window: the file is briefly gone between remove and recreate.
+    std::fs::remove_file(&log_path).expect("remove rotated log");
+    poll_file_sources(&cfg, "host-test", &mut exporter, &mut sources).await;
+    std::fs::write(&log_path, b"two\n").expect("recreate rotated log");
+    poll_file_sources(&cfg, "host-test", &mut exporter, &mut sources).await;
+
+    let first = requests.recv().await.expect("pre-rotation logs request");
+    let second = requests.recv().await.expect("post-rotation logs request");
+
+    assert_eq!(
+        [request_body(&first), request_body(&second)],
+        [Some("line-one"), Some("two")]
+    );
 }
