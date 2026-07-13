@@ -17,6 +17,7 @@ pub const V1: u16 = 1;
 /// public key; `exp` is a Unix timestamp (seconds); `scope` is a list of bare
 /// targetIDs (namespaced by `project` on the relay).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Claims {
     pub v: u16,
     pub project: String,
@@ -31,6 +32,7 @@ pub struct Claims {
 /// A signed enrollment: the claims plus a detached Ed25519 signature over
 /// `canonical(claims)`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Token {
     pub claims: Claims,
     #[serde(with = "base64_bytes")]
@@ -84,6 +86,13 @@ pub fn canonical(claims: &Claims) -> Vec<u8> {
 
 /// Verifies the token's signature against the authority public key and returns
 /// the claims. It does NOT check `exp` — the caller does, with its own clock.
+///
+/// Uses `verify_strict` (rejecting small-order / non-canonical keys), which is
+/// intentionally stricter than the Go relay's `ed25519.Verify`. That is
+/// defence-in-depth and NON-NORMATIVE: the relay is authoritative for
+/// authentication; this local `verify` backs the cross-language conformance test
+/// and any caller sanity-check. A canonical, honestly-signed enrollment (all the
+/// issuer ever produces) verifies identically on both sides.
 pub fn verify(token: &Token, authority_pub: &[u8; 32]) -> Result<Claims, EnrollError> {
     let verifying = VerifyingKey::from_bytes(authority_pub).map_err(|_| EnrollError::Malformed)?;
     let sig_bytes: [u8; 64] = token

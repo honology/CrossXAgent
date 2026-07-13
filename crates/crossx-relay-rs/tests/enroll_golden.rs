@@ -66,3 +66,14 @@ fn verify_rejects_wrong_authority() {
         Err(enroll::EnrollError::InvalidSignature)
     );
 }
+
+#[test]
+fn parsing_rejects_unknown_fields() {
+    // Matches the Go relay's strict decoder (DisallowUnknownFields): a stray field
+    // must fail to parse locally, so a malformed enrollment file is rejected up
+    // front rather than silently entering a doomed reconnect loop.
+    let unknown_claims_field = r#"{"claims":{"v":1,"project":"p","peer":"a","kind":"agent","pub":"AAAA","scope":["x"],"exp":1,"typo":"oops"},"sig":"AAAA"}"#;
+    assert!(serde_json::from_str::<Token>(unknown_claims_field).is_err());
+    let unknown_token_field = r#"{"claims":{"v":1,"project":"p","peer":"a","kind":"agent","pub":"AAAA","scope":["x"],"exp":1},"sig":"AAAA","extra":1}"#;
+    assert!(serde_json::from_str::<Token>(unknown_token_field).is_err());
+}
