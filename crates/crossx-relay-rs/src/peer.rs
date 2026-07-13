@@ -32,7 +32,8 @@ use yamux::{Connection, Mode, Stream};
 
 use crate::{
     RelayError,
-    auth::{relay_binding, transcript},
+    auth::{enrollment_transcript, relay_binding, transcript},
+    enroll,
     frame::{read_frame, write_frame},
     protocol::{
         AuthInit, AuthProof, AuthResp, Challenge, Dial, DialResp, ProxyHeader, Register,
@@ -100,8 +101,12 @@ pub struct RelayConfig {
     pub root_cert_pem: Vec<u8>,
     /// Raw Ed25519 private-key seed registered for this principal.
     pub key_seed: [u8; 32],
-    /// Registered principal identifier sent without normalization.
+    /// Registered principal identifier sent without normalization (M0 path).
     pub principal: String,
+    /// Signed enrollment token. When present, the peer authenticates via the M1
+    /// enrollment path (presenting the token and binding the proof to the full
+    /// enrollment); `principal` is then unused — the identity is the token's peer.
+    pub enrollment: Option<enroll::Token>,
 }
 
 /// Role claimed during the authentication handshake.
@@ -356,13 +361,22 @@ async fn authenticate(
     kind: PeerKind,
     binding: &[u8; 32],
 ) -> Result<(), RelayError> {
+    // With an enrollment present, authenticate via the M1 enrollment path: present
+    // the signed token and bind the proof to the FULL enrollment. Otherwise use the
+    // M0 bare-identity path. The relay picks the authenticator; the client just
+    // signs the matching transcript.
+    let principal_hint = match &cfg.enrollment {
+        Some(token) => token.claims.peer.clone(),
+        None => cfg.principal.clone(),
+    };
     write_frame(
         control,
         "auth_init",
         &AuthInit {
             versions: vec![VERSION],
             kind: kind.wire_name().to_owned(),
-            principal_hint: cfg.principal.clone(),
+            principal_hint,
+            enrollment: cfg.enrollment.clone(),
         },
     )
     .await?;
@@ -374,7 +388,13 @@ async fn authenticate(
         )));
     }
     let signing_key = SigningKey::from_bytes(&cfg.key_seed);
-    let proof = signing_key.sign(&transcript(binding, &cfg.principal, &challenge.nonce));
+    let proof_input = match &cfg.enrollment {
+        Some(token) => {
+            enrollment_transcript(binding, &enroll::canonical(&token.claims), &challenge.nonce)
+        }
+        None => transcript(binding, &cfg.principal, &challenge.nonce),
+    };
+    let proof = signing_key.sign(&proof_input);
     write_frame(
         control,
         "auth_proof",

@@ -1,0 +1,14 @@
+{
+  "claims": {
+    "v": 1,
+    "project": "proj-e2e",
+    "peer": "agent-e2e",
+    "kind": "agent",
+    "pub": "jW8qSA2qh5US654Zo+MtXyoBK9GaSz+2m6u+/wRd5dA=",
+    "scope": [
+      "e2e-node"
+    ],
+    "exp": 4102444800
+  },
+  "sig": "XDJAFeCpXlgoYzMzPWbAPCz1Wf/I0uGSIUCRmujkyRb5G1yIG31AHvIE47vIOKbpq0A7bMUoPo4OF9jkNQvWBQ=="
+}

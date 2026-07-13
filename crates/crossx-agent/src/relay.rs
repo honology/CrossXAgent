@@ -111,11 +111,24 @@ fn load_peer_config(cfg: &RelayConfig) -> anyhow::Result<PeerConfig> {
         anyhow::anyhow!("relay Ed25519 seed must be exactly 32 bytes, got {seed_len}")
     })?;
 
+    // When an enrollment file is configured, authenticate via the M1 enrollment
+    // path; otherwise fall back to the M0 pubkey path using `principal`.
+    let enrollment = if cfg.enrollment_file.is_empty() {
+        None
+    } else {
+        let json = std::fs::read_to_string(Path::new(&cfg.enrollment_file))
+            .with_context(|| format!("reading relay enrollment {}", cfg.enrollment_file))?;
+        let token = serde_json::from_str::<crossx_relay::enroll::Token>(&json)
+            .with_context(|| format!("parsing relay enrollment {}", cfg.enrollment_file))?;
+        Some(token)
+    };
+
     Ok(PeerConfig {
         addr: cfg.addr.clone(),
         root_cert_pem,
         key_seed,
         principal: cfg.principal.clone(),
+        enrollment,
     })
 }
 

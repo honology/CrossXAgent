@@ -10,8 +10,12 @@ pub struct AuthInit {
     pub versions: Vec<u16>,
     /// Claimed peer role (`agent` or `desktop`).
     pub kind: String,
-    /// Registered public-key record identifier.
+    /// Registered public-key record identifier (M0) or the enrollment's peer (M1).
     pub principal_hint: String,
+    /// Signed enrollment token for the M1 enrollment-auth path; omitted (and not
+    /// serialized) on the M0 pubkey path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment: Option<crate::enroll::Token>,
 }
 
 /// Relay authentication challenge.
