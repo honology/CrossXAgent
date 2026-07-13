@@ -10,7 +10,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/honology/crossx-agent"
+repository = "https://github.com/honology/CrossXAgent"
 
 [workspace.dependencies]
 agent-telemetry = { path = "crates/agent-telemetry" }
