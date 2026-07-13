@@ -1,0 +1,45 @@
+name: Release
+
+# Tag a release (e.g. `git tag v0.1.0 && git push origin v0.1.0`) to build the
+# agent binary and publish it to a GitHub release. The CrossXClient bootstrap
+# snippet downloads `<release>/crossx-agent-linux-amd64`, so the asset name is
+# a contract — do not rename it without updating the bootstrap generator.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build linux-amd64 · publish release
+    # Built on an older glibc (22.04) so the binary runs on the broad range of
+    # Linux VM images the agent is provisioned onto via cloud-init.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang build-essential pkg-config
+
+      - name: Rust toolchain
+        run: rustup component add rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p crossx-agent
+
+      - name: Stage asset (bootstrap-contract name)
+        run: cp target/release/crossx-agent crossx-agent-linux-amd64
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: crossx-agent-linux-amd64
+          generate_release_notes: true
