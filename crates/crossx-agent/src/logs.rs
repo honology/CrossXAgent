@@ -424,7 +424,6 @@ impl JournaldFollower {
 
     async fn next(&mut self) -> anyhow::Result<Option<LogRecordSample>> {
         use agent_telemetry::logs::parse_journald_line;
-        use tokio::io::AsyncBufReadExt;
 
         while let Some(line) = self
             .lines

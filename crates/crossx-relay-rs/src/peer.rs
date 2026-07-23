@@ -32,7 +32,8 @@ use yamux::{Connection, Mode, Stream};
 
 use crate::{
     RelayError,
-    auth::{relay_binding, transcript},
+    auth::{enrollment_transcript, relay_binding, transcript},
+    enroll,
     frame::{read_frame, write_frame},
     protocol::{
         AuthInit, AuthProof, AuthResp, Challenge, Dial, DialResp, ProxyHeader, Register,
@@ -100,8 +101,12 @@ pub struct RelayConfig {
     pub root_cert_pem: Vec<u8>,
     /// Raw Ed25519 private-key seed registered for this principal.
     pub key_seed: [u8; 32],
-    /// Registered principal identifier sent without normalization.
+    /// Registered principal identifier sent without normalization (M0 path).
     pub principal: String,
+    /// Signed enrollment token. When present, the peer authenticates via the M1
+    /// enrollment path (presenting the token and binding the proof to the full
+    /// enrollment); `principal` is then unused — the identity is the token's peer.
+    pub enrollment: Option<enroll::Token>,
 }
 
 /// Role claimed during the authentication handshake.
@@ -356,13 +361,22 @@ async fn authenticate(
     kind: PeerKind,
     binding: &[u8; 32],
 ) -> Result<(), RelayError> {
+    // With an enrollment present, authenticate via the M1 enrollment path: present
+    // the signed token and bind the proof to the FULL enrollment. Otherwise use the
+    // M0 bare-identity path. The relay picks the authenticator; the client just
+    // signs the matching transcript.
+    let principal_hint = match &cfg.enrollment {
+        Some(token) => token.claims.peer.clone(),
+        None => cfg.principal.clone(),
+    };
     write_frame(
         control,
         "auth_init",
         &AuthInit {
             versions: vec![VERSION],
             kind: kind.wire_name().to_owned(),
-            principal_hint: cfg.principal.clone(),
+            principal_hint,
+            enrollment: cfg.enrollment.clone(),
         },
     )
     .await?;
@@ -374,7 +388,7 @@ async fn authenticate(
         )));
     }
     let signing_key = SigningKey::from_bytes(&cfg.key_seed);
-    let proof = signing_key.sign(&transcript(binding, &cfg.principal, &challenge.nonce));
+    let proof = signing_key.sign(&proof_transcript(cfg, binding, &challenge.nonce));
     write_frame(
         control,
         "auth_proof",
@@ -391,6 +405,17 @@ async fn authenticate(
         ));
     }
     Ok(())
+}
+
+/// Selects the proof-of-possession transcript to sign: the enrollment-bound
+/// transcript on the M1 path (binding the FULL signed enrollment), the
+/// bare-identity transcript on the M0 path. Extracted so the M1/M0 branch — the
+/// subtle bit a refactor could silently break — is unit-testable without a relay.
+fn proof_transcript(cfg: &RelayConfig, binding: &[u8; 32], nonce: &[u8]) -> Vec<u8> {
+    match &cfg.enrollment {
+        Some(token) => enrollment_transcript(binding, &enroll::canonical(&token.claims), nonce),
+        None => transcript(binding, &cfg.principal, nonce),
+    }
 }
 
 fn response_error(error: Option<String>) -> Result<(), RelayError> {
@@ -449,5 +474,59 @@ async fn drive_connection<T>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_cfg() -> RelayConfig {
+        RelayConfig {
+            addr: "127.0.0.1:0".to_owned(),
+            root_cert_pem: Vec::new(),
+            key_seed: [1_u8; 32],
+            principal: "agent-1".to_owned(),
+            enrollment: None,
+        }
+    }
+
+    #[test]
+    fn proof_transcript_uses_bare_principal_on_m0_path() {
+        let cfg = base_cfg();
+        let binding = [2_u8; 32];
+        let nonce = [3_u8; 8];
+        assert_eq!(
+            proof_transcript(&cfg, &binding, &nonce),
+            transcript(&binding, "agent-1", &nonce)
+        );
+    }
+
+    #[test]
+    fn proof_transcript_binds_full_enrollment_on_m1_path() {
+        let claims = enroll::Claims {
+            v: enroll::V1,
+            project: "proj".to_owned(),
+            peer: "peer-1".to_owned(),
+            kind: "agent".to_owned(),
+            pub_key: vec![9_u8; 32],
+            scope: vec!["vm1".to_owned()],
+            exp: 9_999_999_999,
+        };
+        let mut cfg = base_cfg();
+        cfg.enrollment = Some(enroll::Token {
+            claims: claims.clone(),
+            sig: vec![0_u8; 64],
+        });
+        let binding = [2_u8; 32];
+        let nonce = [3_u8; 8];
+
+        let got = proof_transcript(&cfg, &binding, &nonce);
+        // M1 binds the full signed enrollment, NOT the bare principal identity.
+        assert_eq!(
+            got,
+            enrollment_transcript(&binding, &enroll::canonical(&claims), &nonce)
+        );
+        assert_ne!(got, transcript(&binding, "agent-1", &nonce));
     }
 }

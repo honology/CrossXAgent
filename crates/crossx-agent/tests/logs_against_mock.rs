@@ -149,7 +149,7 @@ async fn run_logs_loop_should_keep_running_when_configured_log_file_is_missing()
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn file_source_should_survive_rotation_window_and_resume_exporting() {
     let (addr, mut requests) = spawn_flaky_logs_collector(0).await;
     let state = tempfile::tempdir().expect("temp state dir");
@@ -160,6 +160,12 @@ async fn file_source_should_survive_rotation_window_and_resume_exporting() {
     std::fs::write(&log_path, b"").expect("seed empty log");
     let mut sources = vec![FileSource::new(log_path.clone(), &checkpoint_dir)];
 
+    // Acquire the source on the empty file first. A file seen for the first time is
+    // tailed from its current end (the agent does not ship pre-existing backlog),
+    // so lines written before this initial poll would be skipped — mirror how the
+    // running agent acquires a source, then observe only lines appended afterward.
+    poll_file_sources(&cfg, "host-test", &mut exporter, &mut sources).await;
+
     std::fs::write(&log_path, b"line-one\n").expect("write first line");
     poll_file_sources(&cfg, "host-test", &mut exporter, &mut sources).await;
     // Rotation window: the file is briefly gone between remove and recreate.
@@ -168,8 +174,15 @@ async fn file_source_should_survive_rotation_window_and_resume_exporting() {
     std::fs::write(&log_path, b"two\n").expect("recreate rotated log");
     poll_file_sources(&cfg, "host-test", &mut exporter, &mut sources).await;
 
-    let first = requests.recv().await.expect("pre-rotation logs request");
-    let second = requests.recv().await.expect("post-rotation logs request");
+    // Bounded recv so a regression that stops exporting fails loudly, not hangs.
+    let first = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("pre-rotation logs request within 5s")
+        .expect("pre-rotation logs request");
+    let second = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("post-rotation logs request within 5s")
+        .expect("post-rotation logs request");
 
     assert_eq!(
         [request_body(&first), request_body(&second)],

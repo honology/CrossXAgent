@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod enroll;
 pub mod frame;
 mod peer;
 pub mod protocol;
