@@ -4,11 +4,11 @@
     "project": "proj-e2e",
     "peer": "agent-e2e",
     "kind": "agent",
-    "pub": "jW8qSA2qh5US654Zo+MtXyoBK9GaSz+2m6u+/wRd5dA=",
+    "pub": "yTzQTpt2cQZovlh+Iu8kEtk7H9VVXpFv+xOWLkMrfzk=",
     "scope": [
       "e2e-node"
     ],
     "exp": 4102444800
   },
-  "sig": "XDJAFeCpXlgoYzMzPWbAPCz1Wf/I0uGSIUCRmujkyRb5G1yIG31AHvIE47vIOKbpq0A7bMUoPo4OF9jkNQvWBQ=="
+  "sig": "fSxoI4gzGnk+dAbm+NR4zqVSj3yyfiltiJylSa3i/7npF43NZZSVVkPuGj/wVLK+/yMwXGF0Q6LciTD/SFJvBQ=="
 }

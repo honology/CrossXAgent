@@ -5,10 +5,11 @@ use std::{
     time::Duration,
 };
 
+mod common;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use crossx_relay::enroll::{self, Claims, Token};
 use crossx_relay::{Peer, PeerKind, RelayConfig};
-use ed25519_dalek::{Signer as _, SigningKey};
+use ed25519_dalek::SigningKey;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -167,28 +168,31 @@ fn config(addr: &str, cert: &[u8], seed_path: PathBuf, principal: &str) -> Relay
         key_seed: STANDARD.decode(seed.trim()).unwrap().try_into().unwrap(),
         principal: principal.to_owned(),
         enrollment: None,
+        chain: Vec::new(),
     }
 }
 
-fn read_seed(path: PathBuf) -> [u8; 32] {
-    let encoded = std::fs::read_to_string(path).unwrap();
-    STANDARD.decode(encoded.trim()).unwrap().try_into().unwrap()
-}
-
-fn enrollment_config(addr: &str, cert: &[u8], seed: [u8; 32], token: Token) -> RelayConfig {
+fn enrollment_chain_config(
+    addr: &str,
+    cert: &[u8],
+    pop_seed: [u8; 32],
+    token: crossx_relay::enroll::Token,
+    chain: Vec<crossx_relay::cert::Cert>,
+) -> RelayConfig {
     RelayConfig {
         addr: addr.to_owned(),
         root_cert_pem: cert.to_vec(),
-        key_seed: seed,
+        key_seed: pop_seed,
         principal: String::new(),
         enrollment: Some(token),
+        chain,
     }
 }
 
-/// Bidirectional enrollment conformance against the real Go relay running the
-/// EnrollmentAuthenticator: the agent presents the GO-signed enrollment from
-/// devmaterial (Go -> Rust), and the desktop presents a RUST-signed enrollment
-/// the Go relay must verify (Rust -> Go), then bytes echo end to end.
+/// Bidirectional chain-enrollment conformance against the real Go relay running
+/// under `-roots`: both peers present Rust-minted `[member, org, issuing]` chains
+/// tracing to one Rust dev-CA root, and the Go relay's `VerifyChain` must accept
+/// them, then bytes echo end to end.
 #[tokio::test]
 #[ignore = "requires RELAY_E2E=1, Go, and the sibling crossx-relay repository"]
 async fn real_go_relay_enrollment_register_dial_and_echo() {
@@ -226,14 +230,17 @@ async fn real_go_relay_enrollment_register_dial_and_echo() {
         "Go relay build failed"
     );
 
-    // Build authorities.json from the devmaterial authority seed.
-    let authority_key =
-        SigningKey::from_bytes(&read_seed(material.path().join("authority.ed25519")));
-    let authority_pub_b64 = STANDARD.encode(authority_key.verifying_key().to_bytes());
-    let authorities_path = material.path().join("authorities.json");
+    // Mint agent + desktop chains under one Rust dev-CA root, and trust that root.
+    const FUTURE: i64 = 4_102_444_800;
+    let ca = common::DevCa::new(FUTURE);
+    let roots_path = material.path().join("roots.json");
     std::fs::write(
-        &authorities_path,
-        format!(r#"{{"authorities":[{{"project":"proj-e2e","pub":"{authority_pub_b64}"}}]}}"#),
+        &roots_path,
+        format!(
+            r#"{{"roots":[{{"id":"{}","pub":"{}"}}]}}"#,
+            ca.root_id,
+            STANDARD.encode(ca.root_pub)
+        ),
     )
     .unwrap();
 
@@ -246,8 +253,8 @@ async fn real_go_relay_enrollment_register_dial_and_echo() {
         .arg(material.path().join("relay-cert.pem"))
         .arg("-key")
         .arg(material.path().join("relay-key.pem"))
-        .arg("-authorities")
-        .arg(&authorities_path)
+        .arg("-roots")
+        .arg(&roots_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -257,14 +264,26 @@ async fn real_go_relay_enrollment_register_dial_and_echo() {
 
     let root_cert_pem = std::fs::read(material.path().join("relay-cert.pem")).unwrap();
 
-    // Agent: present the Go-signed enrollment from devmaterial.
-    let agent_token: Token = serde_json::from_str(
-        &std::fs::read_to_string(material.path().join("enrollment.json")).unwrap(),
-    )
-    .unwrap();
-    let agent_seed = read_seed(material.path().join("agent.ed25519"));
+    // Agent chain + PoP key.
+    let (agent_chain, agent_member) = ca.member("proj-e2e", "agent-e2e", 50, 51);
+    let agent_pop = SigningKey::from_bytes(&[52_u8; 32]);
+    let agent_token = common::enroll_token(
+        &agent_member,
+        &agent_pop,
+        "proj-e2e",
+        "agent-e2e",
+        "agent",
+        &["e2e-node"],
+        FUTURE,
+    );
     let mut agent = Peer::connect(
-        &enrollment_config(&relay_addr, &root_cert_pem, agent_seed, agent_token),
+        &enrollment_chain_config(
+            &relay_addr,
+            &root_cert_pem,
+            [52_u8; 32],
+            agent_token,
+            agent_chain,
+        ),
         PeerKind::Agent,
     )
     .await
@@ -288,38 +307,32 @@ async fn real_go_relay_enrollment_register_dial_and_echo() {
             .unwrap();
     });
 
-    // Desktop: Rust-sign a desktop enrollment with the authority key; the Go relay
-    // must verify it. A fixed test seed keeps the run deterministic.
-    let desktop_seed = [9_u8; 32];
-    let desktop_pub = SigningKey::from_bytes(&desktop_seed)
-        .verifying_key()
-        .to_bytes()
-        .to_vec();
-    let desktop_claims = Claims {
-        v: enroll::V1,
-        project: "proj-e2e".to_owned(),
-        peer: "desktop-e2e".to_owned(),
-        kind: "desktop".to_owned(),
-        pub_key: desktop_pub,
-        scope: vec!["e2e-node".to_owned()],
-        exp: 4_102_444_800,
-    };
-    let desktop_sig = authority_key
-        .sign(&enroll::canonical(&desktop_claims))
-        .to_bytes()
-        .to_vec();
-    let desktop_token = Token {
-        claims: desktop_claims,
-        sig: desktop_sig,
-    };
+    // Desktop chain + PoP key (same org, distinct keys, kind=desktop).
+    let (desktop_chain, desktop_member) = ca.member("proj-e2e", "desktop-e2e", 60, 61);
+    let desktop_pop = SigningKey::from_bytes(&[62_u8; 32]);
+    let desktop_token = common::enroll_token(
+        &desktop_member,
+        &desktop_pop,
+        "proj-e2e",
+        "desktop-e2e",
+        "desktop",
+        &["e2e-node"],
+        FUTURE,
+    );
     let desktop = Peer::connect(
-        &enrollment_config(&relay_addr, &root_cert_pem, desktop_seed, desktop_token),
+        &enrollment_chain_config(
+            &relay_addr,
+            &root_cert_pem,
+            [62_u8; 32],
+            desktop_token,
+            desktop_chain,
+        ),
         PeerKind::Desktop,
     )
     .await
     .unwrap();
     let mut pipe = desktop.dial("e2e-node", "tcp", echo_port).await.unwrap();
-    let message = b"hello via enrollment";
+    let message = b"hello via chain enrollment";
     pipe.write_all(message).await.unwrap();
     let mut echoed = vec![0_u8; message.len()];
     pipe.read_exact(&mut echoed).await.unwrap();

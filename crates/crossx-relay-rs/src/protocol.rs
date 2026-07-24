@@ -16,6 +16,10 @@ pub struct AuthInit {
     /// serialized) on the M0 pubkey path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enrollment: Option<crate::enroll::Token>,
+    /// `[member, org, issuing]` chain authorizing the enrollment's signer up to a
+    /// trusted root. Omitted (and not serialized) on the M0 pubkey path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<crate::cert::Cert>,
 }
 
 /// Relay authentication challenge.

@@ -1,0 +1,29 @@
+[
+  {
+    "subject_pub": "tgYGEoGEfuxkhQGVP2oqbWEQ6tkpjpTjNFmeas4bbz0=",
+    "subject_id": "agent-e2e",
+    "role": "member",
+    "org_namespace": "proj-e2e",
+    "exp": 4102444800,
+    "issuer_id": "proj-e2e",
+    "sig": "Np+MunASGfjwoi76R2gMxoYqgX0dNwRgEWOnXu0dUIMi/kPeofTEfSPL4MY7uxabFwAKWcU95TvhkYlwHxdSBA=="
+  },
+  {
+    "subject_pub": "nAJB7FLn9yTL8M+xPhIKYolSCqiGPXXz2u0Sk29l3wg=",
+    "subject_id": "proj-e2e",
+    "role": "org",
+    "org_namespace": "proj-e2e",
+    "exp": 4102444800,
+    "issuer_id": "issuing",
+    "sig": "Uk8HRSPHqG7Cm3E6G4CezHpmjYgMly/rY+zqYHkt9G/3q6u/kT1lBctDDHJ1orvvB+8knwLnC3V8PIqRWGoGCg=="
+  },
+  {
+    "subject_pub": "I5pDer7d8tN7V3sMDNtV5HRdE/wAeEOxI28Sz5T0XHo=",
+    "subject_id": "issuing",
+    "role": "issuing",
+    "org_namespace": "",
+    "exp": 4102444800,
+    "issuer_id": "dev-root",
+    "sig": "Su/48w3I0E1W5H/QTNbj/8RCg6j6CqvXLiGNouskp1C3rHClKWWy+ZpqoCInIJGVQrxV4tLuk3FO6WkCzqk3Ag=="
+  }
+]
