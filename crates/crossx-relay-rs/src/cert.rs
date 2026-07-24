@@ -5,8 +5,12 @@
 //! `enroll/cert.go`) byte-for-byte, and the `cert_golden` conformance test pins
 //! that against Go `devmaterial` output.
 
+use std::collections::HashMap;
+
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
+
+use crate::enroll::{self, Claims, Token};
 
 /// Domain-separation tag / format version for the certificate canonical bytes.
 const TAG: &[u8] = b"crossx-relay/cert/v1";
@@ -72,6 +76,112 @@ pub fn verify_cert_sig(cert: &Cert, issuer_pub: &[u8]) -> bool {
     verifying
         .verify_strict(&canonical_cert(cert), &Signature::from_bytes(&sig_bytes))
         .is_ok()
+}
+
+/// Resolves a root ID to its trusted public key.
+pub trait RootStore {
+    fn root(&self, id: &str) -> Option<[u8; 32]>;
+}
+
+/// In-memory `RootStore` mapping a root ID to its trusted public key.
+#[derive(Debug, Default, Clone)]
+pub struct RootMap(HashMap<String, [u8; 32]>);
+
+impl RootMap {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn add(&mut self, id: impl Into<String>, pub_key: [u8; 32]) {
+        self.0.insert(id.into(), pub_key);
+    }
+}
+
+impl RootStore for RootMap {
+    fn root(&self, id: &str) -> Option<[u8; 32]> {
+        self.0.get(id).copied()
+    }
+}
+
+/// Chain-validation failures. Variants mirror the Go `enroll` sentinels; `Enroll`
+/// is the member-signed-enrollment failure (`enroll.Verify` in Go).
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ChainError {
+    #[error("invalid certificate chain")]
+    Chain,
+    #[error("issuing cert not signed by a trusted root")]
+    UntrustedRoot,
+    #[error("expired")]
+    Expired,
+    #[error("project outside org namespace")]
+    CrossOrg,
+    #[error("enrollment signature is invalid")]
+    Enroll,
+}
+
+/// Validates a `[member, org, issuing]` chain plus the member-signed enrollment,
+/// returning the trusted claims. Reproduces Go `enroll.VerifyChain`. It does NOT
+/// perform the proof-of-possession — the caller verifies that against
+/// `claims.pub`. `now_unix` is the verifier's clock (seconds).
+pub fn verify_chain(
+    token: &Token,
+    chain: &[Cert],
+    roots: &impl RootStore,
+    now_unix: i64,
+) -> Result<Claims, ChainError> {
+    let [member, org, issuing] = chain else {
+        return Err(ChainError::Chain);
+    };
+    if member.role != ROLE_MEMBER || org.role != ROLE_ORG || issuing.role != ROLE_ISSUING {
+        return Err(ChainError::Chain);
+    }
+    for cert in chain {
+        if cert.exp <= 0 || now_unix >= cert.exp {
+            return Err(ChainError::Expired);
+        }
+    }
+    if !verify_cert_sig(member, &org.subject_pub) || !verify_cert_sig(org, &issuing.subject_pub) {
+        return Err(ChainError::Chain);
+    }
+    let root_pub = roots
+        .root(&issuing.issuer_id)
+        .ok_or(ChainError::UntrustedRoot)?;
+    if !verify_cert_sig(issuing, &root_pub) {
+        return Err(ChainError::UntrustedRoot);
+    }
+    if member.org_namespace.is_empty() || member.org_namespace != org.org_namespace {
+        return Err(ChainError::Chain);
+    }
+    let member_pub: [u8; 32] = member
+        .subject_pub
+        .as_slice()
+        .try_into()
+        .map_err(|_| ChainError::Chain)?;
+    let claims = enroll::verify(token, &member_pub).map_err(|_| ChainError::Enroll)?;
+    if claims.exp <= 0 || now_unix >= claims.exp {
+        return Err(ChainError::Expired);
+    }
+    if !within(&claims.project, &member.org_namespace) {
+        return Err(ChainError::CrossOrg);
+    }
+    Ok(claims)
+}
+
+/// Reports whether `project` is exactly `ns` or a path strictly below it. Both
+/// must be clean paths (no empty, `.`, or `..` segments). Matches Go `within`.
+fn within(project: &str, ns: &str) -> bool {
+    if !clean_path(project) || !clean_path(ns) {
+        return false;
+    }
+    project == ns || project.starts_with(&format!("{ns}/"))
+}
+
+/// Reports whether `s` is non-empty and has no empty, `.`, or `..` segment.
+fn clean_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
 mod base64_bytes {

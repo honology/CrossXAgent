@@ -7,7 +7,7 @@ pub mod frame;
 mod peer;
 pub mod protocol;
 
-pub use cert::Cert;
+pub use cert::{Cert, ChainError, RootMap, RootStore, verify_chain};
 pub use peer::{Peer, PeerKind, ProxyStream, RelayConfig, RelayPipe};
 pub use protocol::ProxyHeader;
 
