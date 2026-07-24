@@ -12,13 +12,13 @@ fn golden_token() -> Token {
         .expect("golden enrollment.json parses")
 }
 
-fn authority_pub() -> [u8; 32] {
-    let seed_b64 = include_str!("fixtures/enroll_golden_authority.seed").trim();
+fn member_pub() -> [u8; 32] {
+    let seed_b64 = include_str!("fixtures/enroll_golden_member.seed").trim();
     let seed: [u8; 32] = STANDARD
         .decode(seed_b64)
-        .expect("authority seed is base64")
+        .expect("member seed is base64")
         .try_into()
-        .expect("authority seed is 32 bytes");
+        .expect("member seed is 32 bytes");
     SigningKey::from_bytes(&seed).verifying_key().to_bytes()
 }
 
@@ -37,7 +37,7 @@ fn canonical_matches_go_golden_byte_for_byte() {
 #[test]
 fn verify_accepts_go_signed_enrollment() {
     let token = golden_token();
-    let claims = enroll::verify(&token, &authority_pub()).expect("Go-signed enrollment verifies");
+    let claims = enroll::verify(&token, &member_pub()).expect("Go-signed enrollment verifies");
     assert_eq!(claims.project, "proj-e2e");
     assert_eq!(claims.peer, "agent-e2e");
     assert_eq!(claims.kind, "agent");
@@ -50,13 +50,13 @@ fn verify_rejects_tampered_claims() {
     let mut token = golden_token();
     token.claims.scope.push("vm-smuggled".to_owned()); // any post-signing edit invalidates
     assert_eq!(
-        enroll::verify(&token, &authority_pub()),
+        enroll::verify(&token, &member_pub()),
         Err(enroll::EnrollError::InvalidSignature)
     );
 }
 
 #[test]
-fn verify_rejects_wrong_authority() {
+fn verify_rejects_wrong_signer() {
     let token = golden_token();
     let other = SigningKey::from_bytes(&[7_u8; 32])
         .verifying_key()
