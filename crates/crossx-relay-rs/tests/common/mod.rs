@@ -15,6 +15,7 @@ fn sign_cert(mut cert: Cert, issuer: &SigningKey) -> Cert {
 pub struct DevCa {
     pub root_id: String,
     pub root_pub: [u8; 32],
+    root: SigningKey,
     issuing: SigningKey,
     pub issuing_cert: Cert,
     exp: i64,
@@ -40,10 +41,33 @@ impl DevCa {
         Self {
             root_id: "rust-dev-root".to_owned(),
             root_pub: root.verifying_key().to_bytes(),
+            root,
             issuing,
             issuing_cert,
             exp,
         }
+    }
+
+    /// Re-issues the issuing cert under a different `issuer_id`, signed by this
+    /// CA's real root (same issuing subject key, so the org link still verifies).
+    /// For the root-lookup-by-id test: the issuing cert NAMES a root it was not
+    /// signed by. `relay_e2e.rs` compiles its own copy of this module and does not
+    /// use this helper, hence `dead_code` there.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn issuing_named(&self, issuer_id: &str) -> Cert {
+        sign_cert(
+            Cert {
+                subject_pub: self.issuing_cert.subject_pub.clone(),
+                subject_id: "issuing".to_owned(),
+                role: ROLE_ISSUING.to_owned(),
+                org_namespace: String::new(),
+                exp: self.exp,
+                issuer_id: issuer_id.to_owned(),
+                sig: Vec::new(),
+            },
+            &self.root,
+        )
     }
 
     /// Mints an org CA for `ns` (from `org_seed`) and a member cert under it

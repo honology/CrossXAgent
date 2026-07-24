@@ -35,6 +35,46 @@ fn accepts_well_formed_chain() {
 }
 
 #[test]
+fn root_lookup_is_by_id() {
+    // With several trusted roots, the issuing cert's issuer_id must name the root
+    // that ACTUALLY signed it — not merely "some stored root". Pins Go
+    // enroll/chain_test.go TestVerifyChainRootLookupIsByID.
+    let ca = DevCa::new(FUTURE);
+    let (chain, member) = ca.member("orgA", "member-1", 70, 71);
+    let pop = SigningKey::from_bytes(&[72_u8; 32]);
+    let token = enroll_token(
+        &member,
+        &pop,
+        "orgA/prod",
+        "peer-1",
+        "agent",
+        &["vm1"],
+        FUTURE,
+    );
+
+    let mut roots = RootMap::new();
+    roots.add(ca.root_id.clone(), ca.root_pub);
+    roots.add(
+        "root-2",
+        SigningKey::from_bytes(&[73_u8; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+
+    // Positive: the correct issuer_id among several roots is accepted.
+    assert!(verify_chain(&token, &chain, &roots, NOW).is_ok());
+
+    // Negative: an issuing cert naming root-2 but signed by this CA's root — an
+    // impl that grabbed "any stored root" would accept it; by-id lookup rejects.
+    let misnamed = ca.issuing_named("root-2");
+    let bad = vec![chain[0].clone(), chain[1].clone(), misnamed];
+    assert_eq!(
+        verify_chain(&token, &bad, &roots, NOW),
+        Err(ChainError::UntrustedRoot)
+    );
+}
+
+#[test]
 fn rejects_cross_org() {
     let (ca, roots) = ca_and_roots();
     let (chain, token) = valid(&ca, "orgB/prod");
