@@ -117,8 +117,13 @@ pub fn enroll_token(
 }
 
 /// Re-signs `cert` with `issuer` (recomputing the canonical over its current
-/// fields). Used by tests to forge or mutate a link.
+/// fields). Used by tests to forge or mutate a link. Only `chain_verify.rs`
+/// exercises the reject-suite paths that need this; `relay_e2e.rs` also builds
+/// this `tests/common` module (each integration-test binary compiles its own
+/// copy) but only mints well-formed chains, so this helper is legitimately
+/// unused there.
 #[must_use]
+#[allow(dead_code)]
 pub fn sign_cert_pub(cert: Cert, issuer: &SigningKey) -> Cert {
     sign_cert(cert, issuer)
 }

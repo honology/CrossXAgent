@@ -33,6 +33,7 @@ use yamux::{Connection, Mode, Stream};
 use crate::{
     RelayError,
     auth::{enrollment_transcript, relay_binding, transcript},
+    cert::Cert,
     enroll,
     frame::{read_frame, write_frame},
     protocol::{
@@ -107,6 +108,9 @@ pub struct RelayConfig {
     /// enrollment path (presenting the token and binding the proof to the full
     /// enrollment); `principal` is then unused — the identity is the token's peer.
     pub enrollment: Option<enroll::Token>,
+    /// Cert chain presented alongside `enrollment` on the M1 chain path. Empty on
+    /// the M0 pubkey path.
+    pub chain: Vec<Cert>,
 }
 
 /// Role claimed during the authentication handshake.
@@ -377,6 +381,7 @@ async fn authenticate(
             kind: kind.wire_name().to_owned(),
             principal_hint,
             enrollment: cfg.enrollment.clone(),
+            chain: cfg.chain.clone(),
         },
     )
     .await?;
@@ -488,6 +493,7 @@ mod tests {
             key_seed: [1_u8; 32],
             principal: "agent-1".to_owned(),
             enrollment: None,
+            chain: Vec::new(),
         }
     }
 

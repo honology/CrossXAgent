@@ -33,6 +33,7 @@ fn protocol_v1_payloads_match_section_3_wire_json() {
             kind: "agent".to_owned(),
             principal_hint: "principal-1".to_owned(),
             enrollment: None,
+            chain: Vec::new(),
         },
         json!({"versions":[1],"kind":"agent","principal_hint":"principal-1"}),
     );
