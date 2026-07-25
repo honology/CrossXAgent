@@ -38,8 +38,30 @@ jobs:
       - name: Stage asset (bootstrap-contract name)
         run: cp target/release/crossx-agent crossx-agent-linux-amd64
 
+      # Publish a checksum beside the binary, and treat it as load-bearing
+      # rather than a nicety.
+      #
+      # This asset is not downloaded by a human who might notice something
+      # wrong. CrossXClient's cloud-init bootstrap curls it onto every compute
+      # node a user provisions and runs it under systemd as root, unattended
+      # (see pkg/services/telemetry/bootstrap.go). Until this existed there was
+      # nothing anywhere in that chain that could tell the real binary from a
+      # substituted one, so a compromised release or a tampered mirror was
+      # remote code execution on every customer VM.
+      #
+      # The .sha256 is what the bootstrap verifies against before it makes the
+      # file executable. Standard `sha256sum -c` format, so it is checkable by
+      # hand too.
+      - name: Checksum the asset
+        run: sha256sum crossx-agent-linux-amd64 > crossx-agent-linux-amd64.sha256
+
+      - name: Verify the checksum file we are about to publish
+        run: sha256sum -c crossx-agent-linux-amd64.sha256
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: crossx-agent-linux-amd64
+          files: |
+            crossx-agent-linux-amd64
+            crossx-agent-linux-amd64.sha256
           generate_release_notes: true
